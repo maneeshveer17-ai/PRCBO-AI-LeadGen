@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none">
+  <rect width="48" height="48" rx="12" fill="#0F172A"/>
+  <path d="M12 14C12 12.8954 12.8954 12 14 12H26C31.5228 12 36 16.4772 36 22C36 27.5228 31.5228 32 26 32H20V35C20 35.5523 19.5523 36 19 36H13C12.4477 36 12 35.5523 12 35V14Z" fill="url(#prcbo-grad)"/>
+  <circle cx="26" cy="22" r="5" fill="#0F172A"/>
+  <path d="M22 36L34 24" stroke="#FF9100" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="34" cy="24" r="3" fill="#FFB74D"/>
+  <defs>
+    <linearGradient id="prcbo-grad" x1="12" y1="12" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF9100"/>
+      <stop offset="1" stop-color="#F26522"/>
+    </linearGradient>
+  </defs>
+</svg>
