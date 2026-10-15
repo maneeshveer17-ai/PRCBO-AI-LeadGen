@@ -17,8 +17,10 @@ import { useLeads } from '../context/LeadContext';
 import { mockImportHistory } from '../data/mockImports';
 
 export const DataImports = () => {
-  const { addToast } = useLeads();
-  const [history, setHistory] = useState(mockImportHistory);
+  const { addToast, addLead, leads } = useLeads();
+  const [history, setHistory] = useState([]);
+const [selectedFile, setSelectedFile] = useState(null);
+const fileInputRef = useRef(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
 
