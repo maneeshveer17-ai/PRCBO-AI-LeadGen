@@ -1,100 +1,337 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
+import * as XLSX from 'xlsx';
 import {
   UploadCloud,
   FileSpreadsheet,
   FileText,
   Database,
+  Download,
   CheckCircle2,
   AlertTriangle,
-  XCircle,
-  Download,
-  RotateCcw,
-  Sparkles,
-  ArrowRight,
-  Filter
+  XCircle
 } from 'lucide-react';
 import { useLeads } from '../context/LeadContext';
-import { mockImportHistory } from '../data/mockImports';
 
 export const DataImports = () => {
   const { addToast, addLead, leads } = useLeads();
+
   const [history, setHistory] = useState([]);
-const [selectedFile, setSelectedFile] = useState(null);
-const fileInputRef = useRef(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef(null);
 
-  const handleSimulateUpload = (fileName) => {
+  const normalize = (value) =>
+    String(value ?? '').trim().toLowerCase();
+
+  const getValue = (row, aliases) => {
+    const normalizedAliases = aliases.map((alias) =>
+      alias.toLowerCase().replace(/[^a-z0-9]/g, '')
+    );
+
+    const key = Object.keys(row).find((item) =>
+      normalizedAliases.includes(
+        item.toLowerCase().replace(/[^a-z0-9]/g, '')
+      )
+    );
+
+    return key ? String(row[key] ?? '').trim() : '';
+  };
+
+  const downloadTemplate = () => {
+    const template = [
+      [
+        'business_name',
+        'category',
+        'location',
+        'email',
+        'phone',
+        'website'
+      ],
+      [
+        'Example Business',
+        'Manufacturing',
+        'Madurai, Tamil Nadu',
+        'contact@example.com',
+        '9876543210',
+        'https://example.com'
+      ]
+    ];
+
+    const worksheet = XLSX.utils.aoa_to_sheet(template);
+    const workbook = XLSX.utils.book_new();
+
+    XLSX.utils.book_append_sheet(
+      workbook,
+      worksheet,
+      'Business Leads'
+    );
+
+    XLSX.writeFile(workbook, 'PRCBO_Lead_Import_Template.csv', {
+      bookType: 'csv'
+    });
+  };
+
+  const handleFileUpload = async (file) => {
+    if (!file) return;
+
+    if (file.size > 25 * 1024 * 1024) {
+      addToast('File size must not exceed 25 MB.', 'error');
+      return;
+    }
+
+    const extension = file.name.split('.').pop().toLowerCase();
+
+    if (!['csv', 'xlsx', 'xls', 'json'].includes(extension)) {
+      addToast('Please upload a CSV, Excel, or JSON file.', 'error');
+      return;
+    }
+
     setIsUploading(true);
-    setTimeout(() => {
-      setIsUploading(false);
-      const newEntry = {
+
+    let rows = [];
+    let valid = 0;
+    let duplicates = 0;
+    let errors = 0;
+
+    try {
+      if (extension === 'json') {
+        const parsed = JSON.parse(await file.text());
+
+        rows = Array.isArray(parsed)
+          ? parsed
+          : parsed.data;
+
+        if (!Array.isArray(rows)) {
+          throw new Error(
+            'JSON must contain an array of business records.'
+          );
+        }
+      } else {
+        const buffer = await file.arrayBuffer();
+        const workbook = XLSX.read(buffer, { type: 'array' });
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+
+        rows = XLSX.utils.sheet_to_json(firstSheet, {
+          defval: '',
+          raw: false
+        });
+      }
+
+      if (rows.length === 0) {
+        throw new Error('The selected file contains no records.');
+      }
+
+      const seen = new Set();
+
+      for (const row of rows) {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) {
+          errors++;
+          continue;
+        }
+
+        const businessName = getValue(row, [
+          'business_name',
+          'businessName',
+          'business',
+          'company_name',
+          'company',
+          'name'
+        ]);
+
+        const location =
+          getValue(row, ['location', 'city', 'address']) || 'India';
+
+        const email = getValue(row, [
+          'email',
+          'email_address',
+          'emailAddress'
+        ]);
+
+        const phone = getValue(row, [
+          'phone',
+          'phone_number',
+          'mobile',
+          'mobile_number'
+        ]);
+
+        const website = getValue(row, [
+          'website',
+          'web_site',
+          'url'
+        ]);
+
+        const category =
+          getValue(row, ['category', 'industry', 'business_type']) ||
+          'Commercial';
+
+        if (!businessName) {
+          errors++;
+          continue;
+        }
+
+        if (
+          email &&
+          !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+        ) {
+          errors++;
+          continue;
+        }
+
+        const duplicateKey =
+          `${normalize(businessName)}|${normalize(location)}`;
+
+        const alreadyExists = (leads || []).some(
+          (lead) =>
+            normalize(lead.businessName ?? lead.business_name) ===
+              normalize(businessName) &&
+            normalize(lead.location) === normalize(location)
+        );
+
+        if (seen.has(duplicateKey) || alreadyExists) {
+          duplicates++;
+          continue;
+        }
+
+        seen.add(duplicateKey);
+
+        try {
+          const saved = await addLead({
+            businessName,
+            category,
+            location,
+            email,
+            phone,
+            website,
+            source:
+              extension === 'csv'
+                ? 'CSV Import'
+                : extension === 'json'
+                  ? 'JSON Import'
+                  : 'Excel Import',
+            isRealData: true
+          });
+
+          if (saved) {
+            valid++;
+          } else {
+            errors++;
+          }
+        } catch {
+          errors++;
+        }
+      }
+
+      const entry = {
         id: `imp-${Date.now()}`,
-        fileName: fileName || "madurai_hospitals_batch_oct.csv",
-        fileSize: "3.2 MB",
-        records: 520,
-        valid: 504,
-        duplicates: 12,
-        errors: 4,
-        status: "Completed",
-        importedBy: "Maneesh V (Admin)",
-        date: "Just now",
-        sourceType: "CSV Upload"
+        fileName: file.name,
+        fileSize: `${(file.size / 1024).toFixed(1)} KB`,
+        records: rows.length,
+        valid,
+        duplicates,
+        errors,
+        status: errors > 0 && valid === 0 ? 'Failed' : 'Completed',
+        importedBy: 'Current User',
+        date: new Date().toLocaleString(),
+        sourceType: `${extension.toUpperCase()} Upload`
       };
-      setHistory([newEntry, ...history]);
-      addToast(`Successfully imported 504 valid records from ${newEntry.fileName}!`, 'success');
-    }, 1200);
+
+      setHistory((previous) => [entry, ...previous]);
+
+      addToast(
+        `Import finished: ${valid} saved, ${duplicates} duplicates skipped, ${errors} errors.`,
+        valid > 0 ? 'success' : 'info'
+      );
+    } catch (error) {
+      addToast(
+        error.message || 'Unable to process the selected file.',
+        'error'
+      );
+    } finally {
+      setIsUploading(false);
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
   };
 
   return (
     <div>
-      {/* Page Header */}
       <div className="page-header">
         <div>
-          <h1 className="page-header-title">Data Imports & Collection</h1>
+          <h1 className="page-header-title">
+            Data Imports & Collection
+          </h1>
           <p className="page-header-subtitle">
-            Upload B2B datasets, run automated schema normalization, deduplicate contacts and ingest into Supabase.
+            Upload, validate, deduplicate and import business leads.
           </p>
         </div>
 
         <div className="page-header-actions">
           <button
+            type="button"
             className="btn btn-outline"
-            onClick={() => addToast("Downloading PRCBO standard B2B import template CSV...", "info")}
+            onClick={downloadTemplate}
           >
             <Download size={15} /> Download CSV Template
           </button>
         </div>
       </div>
 
-      {/* Drag & Drop Upload Container */}
-      <div className="card" style={{ padding: '2rem', marginBottom: '2rem' }}>
+      <div
+        className="card"
+        style={{ padding: '2rem', marginBottom: '2rem' }}
+      >
         <h3 className="card-title" style={{ marginBottom: '0.5rem' }}>
           Import Your Leads
         </h3>
+
         <p className="card-subtitle" style={{ marginBottom: '1.5rem' }}>
-          Our AI pipeline automatically cleanses records, matches Tamil Nadu PIN codes, and detects duplicate GSTIN/phone numbers.
+          Upload business records in CSV, Excel or JSON format.
+          Records are validated before being sent to Supabase.
         </p>
 
-        {/* Drag Drop Zone */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".csv,.xlsx,.xls,.json"
+          hidden
+          onChange={(event) =>
+            handleFileUpload(event.target.files?.[0])
+          }
+        />
+
         <div
-          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setIsDragging(true);
+          }}
           onDragLeave={() => setIsDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
+          onDrop={(event) => {
+            event.preventDefault();
             setIsDragging(false);
-            handleSimulateUpload(e.dataTransfer.files[0]?.name);
+
+            if (!isUploading) {
+              handleFileUpload(event.dataTransfer.files?.[0]);
+            }
           }}
           style={{
-            border: isDragging ? '2px dashed var(--color-primary)' : '2px dashed var(--color-slate-300)',
-            backgroundColor: isDragging ? 'var(--color-primary-light)' : 'var(--color-slate-50)',
+            border: isDragging
+              ? '2px dashed var(--color-primary)'
+              : '2px dashed var(--color-slate-300)',
+            backgroundColor: isDragging
+              ? 'var(--color-primary-light)'
+              : 'var(--color-slate-50)',
             borderRadius: '12px',
             padding: '3rem 1.5rem',
             textAlign: 'center',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease'
+            cursor: isUploading ? 'wait' : 'pointer'
           }}
-          onClick={() => handleSimulateUpload("coimbatore_manufacturing_leads.csv")}
+          onClick={() => {
+            if (!isUploading) {
+              fileInputRef.current?.click();
+            }
+          }}
         >
           <div
             style={{
@@ -103,7 +340,6 @@ const fileInputRef = useRef(null);
               borderRadius: '50%',
               backgroundColor: '#FFFFFF',
               color: 'var(--color-primary)',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.06)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -113,63 +349,58 @@ const fileInputRef = useRef(null);
             <UploadCloud size={32} />
           </div>
 
-          <h4 style={{ fontSize: '1.125rem', fontWeight: 600, color: 'var(--color-slate-800)', marginBottom: '0.35rem' }}>
-            {isUploading ? 'Validating & Normalizing Schema...' : 'Drag and drop lead files here, or browse'}
+          <h4 style={{ marginBottom: '0.5rem' }}>
+            {isUploading
+              ? 'Validating and importing records...'
+              : 'Drag and drop files here, or browse'}
           </h4>
 
-          <p style={{ fontSize: '0.8125rem', color: 'var(--color-slate-500)', maxWidth: '420px', margin: '0 auto 1.5rem' }}>
-            Supported formats: <strong>.CSV</strong>, <strong>.XLSX (Excel)</strong>, or <strong>JSON payload</strong>. Max file size: 25 MB per ingestion batch.
+          <p style={{ marginBottom: '1.5rem' }}>
+            Supported: CSV, XLSX, XLS and JSON. Maximum size: 25 MB.
           </p>
 
           <button
             type="button"
             className="btn btn-primary"
             disabled={isUploading}
-            style={{ pointerEvents: 'none' }}
+            onClick={(event) => {
+              event.stopPropagation();
+              fileInputRef.current?.click();
+            }}
           >
-            {isUploading ? 'Parsing Records...' : 'Choose File to Upload'}
+            {isUploading ? 'Importing...' : 'Choose File to Upload'}
           </button>
         </div>
 
-        {/* Format Compatibility Indicators */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginTop: '1.5rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '0.75rem', borderRadius: '8px', backgroundColor: '#FFFFFF', border: '1px solid var(--color-slate-200)' }}>
-            <FileText size={20} style={{ color: 'var(--color-primary)' }} />
-            <div>
-              <div style={{ fontSize: '0.8125rem', fontWeight: 600 }}>CSV Spreadsheet</div>
-              <div style={{ fontSize: '0.6875rem', color: 'var(--color-slate-400)' }}>UTF-8 formatted comma separated</div>
-            </div>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+            gap: '1rem',
+            marginTop: '1.5rem'
+          }}
+        >
+          <div>
+            <FileText size={20} />
+            <strong> CSV Spreadsheet</strong>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '0.75rem', borderRadius: '8px', backgroundColor: '#FFFFFF', border: '1px solid var(--color-slate-200)' }}>
-            <FileSpreadsheet size={20} style={{ color: '#10B981' }} />
-            <div>
-              <div style={{ fontSize: '0.8125rem', fontWeight: 600 }}>Microsoft Excel (.xlsx)</div>
-              <div style={{ fontSize: '0.6875rem', color: 'var(--color-slate-400)' }}>Multi-sheet support with auto-merge</div>
-            </div>
+          <div>
+            <FileSpreadsheet size={20} />
+            <strong> Excel Spreadsheet</strong>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '0.75rem', borderRadius: '8px', backgroundColor: '#FFFFFF', border: '1px solid var(--color-slate-200)' }}>
-            <Database size={20} style={{ color: '#8B5CF6' }} />
-            <div>
-              <div style={{ fontSize: '0.8125rem', fontWeight: 600 }}>API Webhook Source</div>
-              <div style={{ fontSize: '0.6875rem', color: 'var(--color-slate-400)' }}>REST endpoint integration ready</div>
-            </div>
+          <div>
+            <Database size={20} />
+            <strong> JSON Data</strong>
           </div>
         </div>
       </div>
 
-      {/* Import History Table */}
       <div className="table-container">
-        <div style={{ padding: '1.25rem 1.5rem', borderBottom: '1px solid var(--color-slate-200)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div>
-            <h3 style={{ fontSize: '1.125rem', fontWeight: 600, color: 'var(--color-slate-900)' }}>
-              Ingestion History & Validation Logs
-            </h3>
-            <p style={{ fontSize: '0.8125rem', color: 'var(--color-slate-500)', marginTop: '2px' }}>
-              Detailed audit trail of all historical lead batches and validation integrity
-            </p>
-          </div>
+        <div style={{ padding: '1.25rem 1.5rem' }}>
+          <h3>Import History</h3>
+          <p>Results from uploads in this session.</p>
         </div>
 
         <div className="table-responsive">
@@ -177,81 +408,68 @@ const fileInputRef = useRef(null);
             <thead>
               <tr>
                 <th>File Name & Size</th>
-                <th>Records Ingested</th>
+                <th>Records</th>
                 <th>Valid</th>
                 <th>Duplicates</th>
                 <th>Errors</th>
                 <th>Status</th>
                 <th>Imported By</th>
                 <th>Date & Time</th>
-                <th style={{ textAlign: 'right' }}>Log</th>
               </tr>
             </thead>
+
             <tbody>
-              {history.map((item) => (
-                <tr key={item.id}>
-                  <td>
-                    <div style={{ fontWeight: 600, color: 'var(--color-slate-900)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <FileSpreadsheet size={15} style={{ color: 'var(--color-primary)' }} />
-                      {item.fileName}
-                    </div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--color-slate-400)', marginTop: '2px' }}>
-                      {item.fileSize} &bull; {item.sourceType}
-                    </div>
-                  </td>
-
-                  <td>
-                    <strong style={{ color: 'var(--color-slate-900)' }}>{item.records}</strong>
-                  </td>
-
-                  <td>
-                    <span style={{ color: '#10B981', fontWeight: 600 }}>{item.valid}</span>
-                  </td>
-
-                  <td>
-                    <span style={{ color: '#F59E0B', fontWeight: 600 }}>{item.duplicates}</span>
-                  </td>
-
-                  <td>
-                    <span style={{ color: item.errors > 0 ? '#EF4444' : 'var(--color-slate-400)', fontWeight: 600 }}>
-                      {item.errors}
-                    </span>
-                  </td>
-
-                  <td>
-                    {item.status === 'Completed' && (
-                      <span className="badge badge-converted">Completed</span>
-                    )}
-                    {item.status === 'Processing' && (
-                      <span className="badge badge-followup">Processing</span>
-                    )}
-                    {item.status === 'Failed' && (
-                      <span className="badge badge-rejected">Failed</span>
-                    )}
-                  </td>
-
-                  <td>
-                    <span style={{ fontSize: '0.8125rem', color: 'var(--color-slate-700)' }}>
-                      {item.importedBy}
-                    </span>
-                  </td>
-
-                  <td>
-                    <span style={{ fontSize: '0.75rem', color: 'var(--color-slate-500)' }}>
-                      {item.date}
-                    </span>
-                  </td>
-
-                  <td style={{ textAlign: 'right' }}>
-                    <button
-                      className="btn btn-outline btn-sm"
-                      onClick={() => addToast(`Viewing execution logs for batch ${item.id}`, "info")}
-                    >
-                      Audit Log
-                    </button>
+              {history.length === 0 ? (
+                <tr>
+                  <td colSpan="8" style={{ textAlign: 'center', padding: '2rem' }}>
+                    No files imported in this session yet.
                   </td>
                 </tr>
-              ))}
+              ) : (
+                history.map((item) => (
+                  <tr key={item.id}>
+                    <td>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <FileSpreadsheet size={15} />
+                        {item.fileName}
+                      </div>
+                      <small>
+                        {item.fileSize} · {item.sourceType}
+                      </small>
+                    </td>
+
+                    <td>{item.records}</td>
+                    <td>
+                      <span style={{ color: '#10B981' }}>
+                        <CheckCircle2 size={14} /> {item.valid}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{ color: '#F59E0B' }}>
+                        <AlertTriangle size={14} /> {item.duplicates}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{ color: '#EF4444' }}>
+                        <XCircle size={14} /> {item.errors}
+                      </span>
+                    </td>
+                    <td>
+                      <span
+                        className={
+                          item.status === 'Completed'
+                            ? 'badge badge-converted'
+                            : 'badge badge-rejected'
+                     }
+                      >
+                        {item.status}
+                      </span>
+                    </td>
+                    <td>{item.importedBy}</td>
+                    <td>{item.date}</td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
