@@ -172,11 +172,14 @@ export const DataImports = () => {
         if (
           email &&
           !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-        ) {
+        ){
           errors++;
           continue;
         }
-
+        if (phone && !/^[6-9]\d{9}$/.test(phone)) {
+  errors++;
+  continue;
+}
         const duplicateKey =
           `${normalize(businessName)}|${normalize(location)}`;
 
