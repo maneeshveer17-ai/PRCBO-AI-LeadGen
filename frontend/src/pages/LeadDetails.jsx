@@ -58,7 +58,7 @@ export const LeadDetails = () => {
   } = useLeads();
 
   // Find lead by ID or fallback safely
-  const lead = leads.find(l => l.id === id) || (leads.length > 0 ? leads[0] : null);
+  const lead = leads.find(l => l.id === id || String(l.id) === String(id)) || (leads.length > 0 ? leads[0] : null);
 
   const [isScoring, setIsScoring] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -291,6 +291,58 @@ export const LeadDetails = () => {
     }
   };
 
+  const handleShareLead = async () => {
+    const targetId = lead?.id || id;
+    if (!targetId) {
+      addToast('No lead identifier available to share.', 'warning');
+      return;
+    }
+
+    const shareUrl = `${window.location.origin}/leads/${targetId}`;
+    const shareTitle = lead?.businessName ? `${lead.businessName} - Lead Details` : 'PRCBO Lead Details';
+    const shareText = `Review lead details for ${lead?.businessName || 'this business'} on PRCBO AI LeadGen`;
+
+    // Try Web Share API if supported
+    if (typeof navigator !== 'undefined' && navigator.share) {
+      try {
+        await navigator.share({
+          title: shareTitle,
+          text: shareText,
+          url: shareUrl
+        });
+        addToast('Lead details shared successfully', 'success');
+        return;
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          // User dismissed the native share sheet
+          return;
+        }
+        // Fall back to clipboard if navigator.share fails
+      }
+    }
+
+    // Graceful fallback to Clipboard API
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareUrl);
+        addToast('Lead details link copied to clipboard!', 'success');
+      } else {
+        const textArea = document.createElement('textarea');
+        textArea.value = shareUrl;
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+        addToast('Lead details link copied to clipboard!', 'success');
+      }
+    } catch {
+      addToast('Failed to copy link to clipboard', 'error');
+    }
+  };
+
   const getOpportunityColor = (level) => {
     switch (level) {
       case 'CRITICAL':
@@ -398,7 +450,8 @@ export const LeadDetails = () => {
             </button>
             <button
               className="btn btn-outline"
-              onClick={() => addToast("Lead details link copied for internal sharing", "info")}
+              onClick={handleShareLead}
+              title="Share or copy lead details link"
             >
               <Share2 size={15} /> Share
             </button>
