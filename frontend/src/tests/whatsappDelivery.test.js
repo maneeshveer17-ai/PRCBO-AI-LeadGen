@@ -7,6 +7,7 @@ import {
   extractJwtPayload,
   verifyOperatorClaims,
   redactSecrets,
+  classifyMetaApiError,
   inFlightDispatches
 } from '../../../supabase/functions/send-whatsapp/index.ts';
 import {
@@ -356,6 +357,59 @@ describe('Meta WhatsApp Cloud API Integration (PRCBO LeadGen)', () => {
       // Critical requirement: lead MUST NOT be marked Contacted on provider failure
       assert.strictEqual(leadUpdatedStatus, null);
       assert.strictEqual(insertedLogStatus, 'Failed');
+    });
+
+    test('Meta Code 190 Authentication Error returns HTTP 502 with EXPIRED_ACCESS_TOKEN classification and actionable resolution', async () => {
+      let insertedLogStatus = null;
+      let insertedLogMetadata = null;
+
+      const mockFetch = async (url, init) => {
+        const urlStr = String(url);
+        if (urlStr.includes('/rest/v1/outreach_logs')) {
+          if (init.method === 'POST' || init.method === 'PATCH') {
+            const body = JSON.parse(init.body);
+            insertedLogStatus = body.status;
+            insertedLogMetadata = body.metadata;
+            return new Response(JSON.stringify([{ id: 'log-uuid-auth-fail', ...body }]), { status: 201 });
+          }
+          if (urlStr.includes('select=')) {
+            return new Response(JSON.stringify([]), { status: 200 });
+          }
+        }
+        if (urlStr.includes('graph.facebook.com')) {
+          return new Response(JSON.stringify({
+            error: {
+              message: "Error validating access token: The session has been invalidated because the user changed their password or Facebook has changed the session for security reasons.",
+              type: "OAuthException",
+              code: 190,
+              error_subcode: 463,
+              fbtrace_id: "A1B2C3D4E5"
+            }
+          }), { status: 401 });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const req = new Request('http://localhost/send-whatsapp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: validOperatorToken
+        },
+        body: JSON.stringify(validTemplatePayload)
+      });
+
+      const res = await handleSendWhatsAppRequest(req, { env: mockEnv, fetchFn: mockFetch });
+      assert.strictEqual(res.status, 502);
+      const data = await res.json();
+      assert.strictEqual(data.status, 'Failed');
+      assert.strictEqual(data.metaError.code, 190);
+      assert.strictEqual(data.metaError.error_subcode, 463);
+      assert.strictEqual(data.classification.category, 'EXPIRED_ACCESS_TOKEN');
+      assert.ok(data.classification.actionableResolution.includes('WHATSAPP_ACCESS_TOKEN'));
+      assert.ok(data.details.includes('Code 190'));
+      assert.strictEqual(insertedLogStatus, 'Failed');
+      assert.strictEqual(insertedLogMetadata.classification.category, 'EXPIRED_ACCESS_TOKEN');
     });
 
     test('Network failure when contacting Meta API returns 502 with diagnostic details', async () => {
@@ -1007,6 +1061,68 @@ describe('Meta WhatsApp Cloud API Integration (PRCBO LeadGen)', () => {
       // One request succeeds normally, the other is suppressed as in-flight duplicate
       const suppressedCount = [data1, data2].filter(d => d.isDuplicateSuppressed).length;
       assert.strictEqual(suppressedCount, 1, 'One of the concurrent requests must have isDuplicateSuppressed: true');
+    });
+  });
+
+  /* -------------------------------------------------------------------------- */
+  /* 5c. Meta API Diagnostic Error Classification                               */
+  /* -------------------------------------------------------------------------- */
+  describe('5c. Meta API Diagnostic Error Classification', () => {
+    test('Code 190 with subcode 463 or 467 maps to EXPIRED_ACCESS_TOKEN', () => {
+      const res = classifyMetaApiError({ code: 190, error_subcode: 463, message: 'Session expired' }, 401);
+      assert.strictEqual(res.category, 'EXPIRED_ACCESS_TOKEN');
+      assert.ok(res.actionableResolution.includes('WHATSAPP_ACCESS_TOKEN'));
+      assert.ok(res.actionableResolution.includes('permanent System User'));
+    });
+
+    test('Code 190 with session expired text maps to EXPIRED_ACCESS_TOKEN even without subcode', () => {
+      const res = classifyMetaApiError({ code: 190, message: 'Error validating access token: Session has expired' }, 401);
+      assert.strictEqual(res.category, 'EXPIRED_ACCESS_TOKEN');
+      assert.ok(res.summary.includes('Code 190'));
+    });
+
+    test('Code 190 with generic Authentication Error maps to INVALID_ACCESS_TOKEN', () => {
+      const res = classifyMetaApiError({ code: 190, message: 'Invalid OAuth access token' }, 401);
+      assert.strictEqual(res.category, 'INVALID_ACCESS_TOKEN');
+      assert.ok(res.actionableResolution.includes('WHATSAPP_ACCESS_TOKEN'));
+    });
+
+    test('Code 190 with subcode 458 maps to PERMISSION_DENIED (revoked)', () => {
+      const res = classifyMetaApiError({ code: 190, error_subcode: 458, message: 'App not installed' }, 403);
+      assert.strictEqual(res.category, 'PERMISSION_DENIED');
+      assert.ok(res.summary.includes('Subcode 458'));
+    });
+
+    test('Code 100 with "Object with ID does not exist" maps to INVALID_PHONE_NUMBER_ID', () => {
+      const res = classifyMetaApiError({
+        code: 100,
+        message: "Unsupported post request. Object with ID '123456789' does not exist"
+      }, 400);
+      assert.strictEqual(res.category, 'INVALID_PHONE_NUMBER_ID');
+      assert.ok(res.actionableResolution.includes('WHATSAPP_PHONE_NUMBER_ID'));
+      assert.ok(res.actionableResolution.includes('15-digit Phone Number ID'));
+    });
+
+    test('Code 10 or 200 maps to PERMISSION_DENIED', () => {
+      const res = classifyMetaApiError({ code: 10, message: 'Application does not have permission for this action' }, 403);
+      assert.strictEqual(res.category, 'PERMISSION_DENIED');
+      assert.ok(res.actionableResolution.includes('whatsapp_business_messaging'));
+    });
+
+    test('Code 131030 maps to CUSTOMER_WINDOW_EXPIRED', () => {
+      const res = classifyMetaApiError({ code: 131030, message: 'Message failed to send: more than 24 hours have passed' }, 400);
+      assert.strictEqual(res.category, 'CUSTOMER_WINDOW_EXPIRED');
+      assert.ok(res.actionableResolution.includes('template'));
+    });
+
+    test('Code 132001 maps to TEMPLATE_ERROR', () => {
+      const res = classifyMetaApiError({ code: 132001, message: 'Template name does not exist' }, 400);
+      assert.strictEqual(res.category, 'TEMPLATE_ERROR');
+    });
+
+    test('Rate limit code 130429 maps to RATE_LIMITED', () => {
+      const res = classifyMetaApiError({ code: 130429, message: 'Rate limit hit' }, 429);
+      assert.strictEqual(res.category, 'RATE_LIMITED');
     });
   });
 

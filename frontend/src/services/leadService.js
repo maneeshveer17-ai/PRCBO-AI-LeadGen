@@ -938,7 +938,8 @@ export const sendWhatsAppOutreachViaEdgeFunction = async ({
           status: statusCode,
           details: errorDetails ? (errorDetails.details || errorDetails.error || extractedMessage) : error.message,
           metaStatus: errorDetails?.metaStatus || null,
-          metaError: errorDetails?.metaError || null
+          metaError: errorDetails?.metaError || null,
+          classification: errorDetails?.classification || null
         }
       };
     }
@@ -951,7 +952,8 @@ export const sendWhatsAppOutreachViaEdgeFunction = async ({
           details: data.details || null,
           status: data.status || 'Failed',
           metaStatus: data.metaStatus || null,
-          metaError: data.metaError || null
+          metaError: data.metaError || null,
+          classification: data.classification || null
         }
       };
     }

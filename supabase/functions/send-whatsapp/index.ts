@@ -139,6 +139,132 @@ export function verifyOperatorClaims(claims: any): { isAuthorized: boolean; oper
   };
 }
 
+export interface MetaErrorClassification {
+  category:
+    | "EXPIRED_ACCESS_TOKEN"
+    | "INVALID_ACCESS_TOKEN"
+    | "MISSING_ACCESS_TOKEN"
+    | "MISSING_PHONE_NUMBER_ID"
+    | "MISSING_SECRETS"
+    | "INVALID_PHONE_NUMBER_ID"
+    | "PERMISSION_DENIED"
+    | "CUSTOMER_WINDOW_EXPIRED"
+    | "TEMPLATE_ERROR"
+    | "RATE_LIMITED"
+    | "META_API_ERROR";
+  summary: string;
+  actionableResolution: string;
+}
+
+/**
+ * Classifies Meta Graph / WhatsApp Cloud API errors into distinct, actionable failure categories.
+ * Clearly distinguishes expired vs. invalid access tokens, missing configuration, invalid phone IDs, and permission denials.
+ */
+export function classifyMetaApiError(err: any, metaStatus: number): MetaErrorClassification {
+  const code = Number(err?.code) || 0;
+  const subcode = Number(err?.error_subcode) || 0;
+  const msg = String(err?.message || "").toLowerCase();
+  const type = String(err?.type || "").toLowerCase();
+
+  // 1. Expired Access Token (Code 190, Subcode 463/467 or expired session)
+  if (
+    code === 190 &&
+    (subcode === 463 || subcode === 467 || msg.includes("expired") || msg.includes("session has expired"))
+  ) {
+    return {
+      category: "EXPIRED_ACCESS_TOKEN",
+      summary: `Meta WhatsApp access token has expired (Code 190${subcode ? `, Subcode ${subcode}` : ""})`,
+      actionableResolution:
+        "The Meta access token has expired (temporary test tokens expire after 24 hours). Generate a permanent System User access token with 'whatsapp_business_messaging' and 'whatsapp_business_management' permissions in Meta Business Manager and update WHATSAPP_ACCESS_TOKEN in Supabase secrets."
+    };
+  }
+
+  // 2. Permission Revoked or App Not Installed (Code 190, Subcode 458/492)
+  if (
+    code === 190 &&
+    (subcode === 458 || subcode === 492 || msg.includes("revoked") || msg.includes("not installed"))
+  ) {
+    return {
+      category: "PERMISSION_DENIED",
+      summary: `Meta permissions revoked or app uninstalled (Code 190${subcode ? `, Subcode ${subcode}` : ""})`,
+      actionableResolution:
+        "Verify WhatsApp permissions in Meta Business Manager and ensure the System User has access to the WhatsApp Business Account."
+    };
+  }
+
+  // 3. Other Authentication / Token Failures (Code 190 or OAuthException)
+  if (code === 190 || type.includes("oauthexception")) {
+    return {
+      category: "INVALID_ACCESS_TOKEN",
+      summary: `Invalid Meta WhatsApp access token (Code 190: Authentication Error)`,
+      actionableResolution:
+        "Meta rejected the access token. Verify that WHATSAPP_ACCESS_TOKEN in Supabase secrets is an active, valid System User access token without leading/trailing whitespace or quotes."
+    };
+  }
+
+  // 4. Invalid Phone Number ID
+  // Meta returns Code 100 with "Object with ID '...' does not exist", "Unsupported post request", or Code 80007 / Subcode 33
+  if (
+    (code === 100 && (msg.includes("object with id") || msg.includes("does not exist") || msg.includes("unsupported") || msg.includes("cannot parse"))) ||
+    code === 80007 ||
+    subcode === 33
+  ) {
+    return {
+      category: "INVALID_PHONE_NUMBER_ID",
+      summary: `Invalid WhatsApp Phone Number ID (Code ${code || 100}${subcode ? `, Subcode ${subcode}` : ""})`,
+      actionableResolution:
+        "Meta could not locate the phone number ID. Confirm that WHATSAPP_PHONE_NUMBER_ID in Supabase secrets matches the 15-digit Phone Number ID in Meta Developer Dashboard -> WhatsApp -> API Setup (not the WhatsApp Business Account ID or phone number)."
+    };
+  }
+
+  // 5. Permission / Access Denied (Code 10, 200, 299)
+  if (code === 10 || code === 200 || code === 299 || msg.includes("permission") || msg.includes("access denied")) {
+    return {
+      category: "PERMISSION_DENIED",
+      summary: `Meta WhatsApp permission failure (Code ${code})`,
+      actionableResolution:
+        "Ensure the System User or Token has 'whatsapp_business_messaging' permissions and that the WhatsApp Business Account (WABA) is linked to your app."
+    };
+  }
+
+  // 6. 24-Hour Customer Window Expired (Code 131030)
+  if (code === 131030 || msg.includes("24 hours")) {
+    return {
+      category: "CUSTOMER_WINDOW_EXPIRED",
+      summary: "24-hour customer service window expired (Code 131030)",
+      actionableResolution:
+        "Business-initiated conversations must use an approved Meta message template (e.g. prcbo_lead_outreach or hello_world) rather than free-form text."
+    };
+  }
+
+  // 7. Template Errors (Code 132000, 132001, 132005, 132015)
+  if (code === 132000 || code === 132001 || code === 132005 || code === 132015 || msg.includes("template")) {
+    return {
+      category: "TEMPLATE_ERROR",
+      summary: `Meta template error (Code ${code})`,
+      actionableResolution:
+        "Verify that the template name exists, is approved in Meta WhatsApp Manager, matches the exact language code, and has valid parameter counts."
+    };
+  }
+
+  // 8. Rate Limiting / Messaging Throughput (Code 130429, 131048, 131056)
+  if (code === 130429 || code === 131048 || code === 131056) {
+    return {
+      category: "RATE_LIMITED",
+      summary: `WhatsApp rate limit exceeded (Code ${code})`,
+      actionableResolution:
+        "Pause messaging temporarily. Check WhatsApp Business Account tier limits and quality rating in Meta WhatsApp Manager."
+    };
+  }
+
+  // Default fallback
+  return {
+    category: "META_API_ERROR",
+    summary: err?.message ? `Meta API error [Code ${code || metaStatus}]: ${err.message}` : `HTTP ${metaStatus} error from Meta Cloud API`,
+    actionableResolution: "Check Meta Developer Dashboard and Graph API status for service availability and error details."
+  };
+}
+
 export const inFlightDispatches = new Set<string>();
 
 export async function handleSendWhatsAppRequest(
@@ -227,12 +353,27 @@ export async function handleSendWhatsAppRequest(
 
     const accessToken = getEnv("WHATSAPP_ACCESS_TOKEN");
     const phoneNumberId = getEnv("WHATSAPP_PHONE_NUMBER_ID");
+    const apiVersion = getEnv("WHATSAPP_API_VERSION") || getEnv("META_API_VERSION") || "v21.0";
 
     if (!accessToken || !accessToken.trim() || !phoneNumberId || !phoneNumberId.trim()) {
-      console.error("[send-whatsapp] Missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID in environment secrets.");
+      const missingKeys: string[] = [];
+      if (!accessToken || !accessToken.trim()) missingKeys.push("WHATSAPP_ACCESS_TOKEN");
+      if (!phoneNumberId || !phoneNumberId.trim()) missingKeys.push("WHATSAPP_PHONE_NUMBER_ID");
+
+      console.error(`[send-whatsapp] Missing ${missingKeys.join(" and ")} in environment secrets.`);
+      const category = !accessToken && !phoneNumberId
+        ? "MISSING_SECRETS"
+        : (!accessToken ? "MISSING_ACCESS_TOKEN" : "MISSING_PHONE_NUMBER_ID");
+
       return new Response(
         JSON.stringify({
-          error: "WhatsApp delivery service unconfigured: WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID missing from Supabase secrets."
+          error: `WhatsApp delivery service unconfigured: ${missingKeys.join(" or ")} missing from Supabase secrets.`,
+          missingSecrets: missingKeys,
+          classification: {
+            category,
+            summary: `Missing Supabase Secret(s): ${missingKeys.join(", ")}`,
+            actionableResolution: `Configure ${missingKeys.join(" and ")} in Supabase Dashboard (Settings -> Edge Functions -> Secrets) or via Supabase CLI ('supabase secrets set ${missingKeys.map(k => `${k}=...`).join(" ")}').`
+          }
         }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
@@ -412,7 +553,8 @@ export async function handleSendWhatsAppRequest(
     }
 
     // 4. Construct Meta WhatsApp Cloud API Payload
-    const metaApiUrl = `https://graph.facebook.com/v21.0/${phoneNumberId.trim()}/messages`;
+    const cleanApiVersion = apiVersion.trim().startsWith("v") ? apiVersion.trim() : `v${apiVersion.trim()}`;
+    const metaApiUrl = `https://graph.facebook.com/${cleanApiVersion}/${phoneNumberId.trim()}/messages`;
     let metaRequestBody: Record<string, any>;
 
     if (templateName && templateName.trim()) {
@@ -577,9 +719,11 @@ export async function handleSendWhatsAppRequest(
 
       let failureDetail = "";
       let safeMetaError: Record<string, any> | null = null;
+      let classification: MetaErrorClassification | null = null;
 
       if (parsedErrorBody?.error) {
         const err = parsedErrorBody.error;
+        classification = classifyMetaApiError(err, metaRes.status);
         safeMetaError = redactSecrets({
           message: err.message,
           type: err.type,
@@ -596,17 +740,28 @@ export async function handleSendWhatsAppRequest(
         if (err.error_subcode) codeParts.push(`Subcode ${err.error_subcode}`);
         const codePrefix = codeParts.length ? `[${codeParts.join(", ")}] ` : "";
 
-        failureDetail = `${codePrefix}${err.message || "Meta API error"}`;
+        failureDetail = `${codePrefix}${err.message || classification.summary}`;
         if (err.error_data?.details) {
           failureDetail += ` (${err.error_data.details})`;
         }
         if (err.error_user_msg) {
           failureDetail += ` - ${err.error_user_msg}`;
         }
+        if (classification?.actionableResolution) {
+          failureDetail += ` [Resolution: ${classification.actionableResolution}]`;
+        }
       } else if (rawErrorBody && rawErrorBody.trim()) {
+        classification = classifyMetaApiError({ message: rawErrorBody }, metaRes.status);
         failureDetail = `HTTP ${metaRes.status}: ${redactSecrets(rawErrorBody.trim().slice(0, 300))}`;
+        if (classification?.actionableResolution) {
+          failureDetail += ` [Resolution: ${classification.actionableResolution}]`;
+        }
       } else {
+        classification = classifyMetaApiError(null, metaRes.status);
         failureDetail = `HTTP ${metaRes.status} response from Meta Cloud API`;
+        if (classification?.actionableResolution) {
+          failureDetail += ` [Resolution: ${classification.actionableResolution}]`;
+        }
       }
 
       // Record definite failure in Supabase (updating reservation if present, else inserting)
@@ -627,6 +782,10 @@ export async function handleSendWhatsAppRequest(
                 metadata: {
                   metaStatus: metaRes.status,
                   metaError: safeMetaError,
+                  classification: classification ? {
+                    category: classification.category,
+                    summary: classification.summary
+                  } : undefined,
                   template: templateName || null,
                   languageCode: languageCode || "en_US",
                   failureType: "definite_rejection"
@@ -657,6 +816,10 @@ export async function handleSendWhatsAppRequest(
                 metadata: {
                   metaStatus: metaRes.status,
                   metaError: safeMetaError,
+                  classification: classification ? {
+                    category: classification.category,
+                    summary: classification.summary
+                  } : undefined,
                   template: templateName || null,
                   languageCode: languageCode || "en_US"
                 }
@@ -675,7 +838,12 @@ export async function handleSendWhatsAppRequest(
           details: failureDetail,
           status: "Failed",
           metaStatus: metaRes.status,
-          metaError: safeMetaError
+          metaError: safeMetaError,
+          classification: classification ? {
+            category: classification.category,
+            summary: classification.summary,
+            actionableResolution: classification.actionableResolution
+          } : undefined
         }),
         { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
