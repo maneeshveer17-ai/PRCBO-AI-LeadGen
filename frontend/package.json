@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test src/tests/leadService.test.js src/tests/aiOutreach.test.js src/tests/sendEmail.test.js src/tests/resendWebhook.test.js src/tests/whatsappDelivery.test.js ../ai/lead_scoring/scoringEngine.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.3",

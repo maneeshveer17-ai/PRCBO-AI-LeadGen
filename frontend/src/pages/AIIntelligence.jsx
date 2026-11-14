@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Brain,
@@ -15,13 +15,18 @@ import {
   BarChart2,
   Zap,
   Lightbulb,
-  SlidersHorizontal
+  SlidersHorizontal,
+  RefreshCw
 } from 'lucide-react';
 import { useLeads } from '../context/LeadContext';
 import StatCard from '../components/common/StatCard';
 import ChartCard from '../components/common/ChartCard';
 import ScoreHistogramChart from '../components/charts/ScoreHistogramChart';
 import BarServiceChart from '../components/charts/BarServiceChart';
+import {
+  calculateScoreDistribution,
+  calculateServiceDistribution
+} from '../services/leadAnalyticsService.js';
 import {
   mockScoreDistribution,
   mockServiceDistribution,
@@ -30,12 +35,24 @@ import {
 
 export const AIIntelligence = () => {
   const navigate = useNavigate();
-  const { leads, addToast } = useLeads();
+  const { leads, addToast, recalculateAllScores, isLoadingLeads } = useLeads();
   const [activeModelTab, setActiveModelTab] = useState('insights');
+
+  // Compute dynamic score and service distributions from active leads
+  const scoreDistributionData = useMemo(() => {
+    return leads.length > 0 ? calculateScoreDistribution(leads) : mockScoreDistribution;
+  }, [leads]);
+
+  const serviceDistributionData = useMemo(() => {
+    return leads.length > 0 ? calculateServiceDistribution(leads) : mockServiceDistribution;
+  }, [leads]);
 
   // Compute metrics from active leads
   const total = leads.length;
-  const avgScore = total > 0 ? Math.round(leads.reduce((a, b) => a + (b.aiScore || 0), 0) / total) : 84;
+  const validScoredLeads = leads.filter(l => typeof l.aiScore === 'number' && !isNaN(l.aiScore) && l.aiScore !== null);
+  const avgScore = validScoredLeads.length > 0
+    ? Math.round(validScoredLeads.reduce((a, b) => a + b.aiScore, 0) / validScoredLeads.length)
+    : (total > 0 ? 0 : 84);
   const hotLeads = leads.filter(l => l.scoreTier === 'HOT').length;
   const highPotential = leads.filter(l => l.scoreTier === 'HIGH').length;
   const mediumPotential = leads.filter(l => l.scoreTier === 'MEDIUM').length;
@@ -58,10 +75,12 @@ export const AIIntelligence = () => {
         <div className="page-header-actions">
           <button
             className="btn btn-outline"
-            onClick={() => addToast("Re-scoring algorithm queued across 2,486 records", "info")}
+            onClick={recalculateAllScores}
+            disabled={isLoadingLeads}
+            title="Recalculate AI scores across all lead records"
           >
-            <Zap size={15} style={{ color: '#FF7A00' }} />
-            Recalculate AI Scores
+            <Zap size={15} style={{ color: '#FF7A00' }} className={isLoadingLeads ? 'animate-spin' : ''} />
+            {isLoadingLeads ? 'Evaluating...' : 'Recalculate AI Scores'}
           </button>
           <button
             className="btn btn-primary"
@@ -217,17 +236,17 @@ export const AIIntelligence = () => {
         {/* Score Distribution */}
         <ChartCard
           title="Predictive Score Frequency Distribution"
-          subtitle="Proportion of business leads categorized by qualification probability"
+          subtitle={leads.length > 0 ? `Dynamic score allocation evaluated across ${leads.length} leads` : "Proportion of business leads categorized by qualification probability"}
         >
-          <ScoreHistogramChart data={mockScoreDistribution} height={200} />
+          <ScoreHistogramChart data={scoreDistributionData} height={200} />
         </ChartCard>
 
         {/* Opportunity Category Demand */}
         <ChartCard
           title="Service Demand Mapped to PRCBO Capabilities"
-          subtitle="Lead volume by recommended technical architecture"
+          subtitle={leads.length > 0 ? "Lead volume mapped to PRCBO technical architecture" : "Lead volume by recommended technical architecture"}
         >
-          <BarServiceChart data={mockServiceDistribution} />
+          <BarServiceChart data={serviceDistributionData} />
         </ChartCard>
       </div>
 

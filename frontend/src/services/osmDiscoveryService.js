@@ -234,7 +234,7 @@ function normalizeNominatimItem(item, cityMeta, requestedCategory) {
     // Source tracking
     source: 'OpenStreetMap (Live POI)',
     sourceProvider: 'OpenStreetMap / Nominatim',
-    sourceId: `${osmType}/${osmId}`,
+    sourceId: `osm-${osmType}-${osmId}`,
     isRealData: true,
     isMock: false,
     // AI qualification is unperformed — do not fabricate scores!

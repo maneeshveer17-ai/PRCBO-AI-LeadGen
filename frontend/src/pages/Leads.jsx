@@ -32,6 +32,7 @@ import ScoreBadge from '../components/common/ScoreBadge';
 import Pagination from '../components/common/Pagination';
 import EmptyState from '../components/common/EmptyState';
 import Modal from '../components/common/Modal';
+import { exportToExcel, exportToPDF } from '../services/leadExportService';
 
 export const Leads = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -79,6 +80,96 @@ export const Leads = () => {
     recommendedService: 'Web Development',
     aiScore: 88
   });
+
+  // Export modal state
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+
+  const handleExportExcel = () => {
+    if (isExporting) return;
+    if (!filteredLeads || filteredLeads.length === 0) {
+      addToast('No lead records match the active filters to export.', 'error');
+      return;
+    }
+    setIsExporting(true);
+    try {
+      const dateStr = new Date().toISOString().split('T')[0];
+      const filename = `PRCBO_Leads_${activeTab}_${dateStr}.xlsx`;
+      const filterSummary = {
+        dateRangeLabel: 'Current Filter View',
+        status: activeTab,
+        category: selectedCategory,
+        location: selectedLocation,
+        service: selectedService
+      };
+      const validScores = filteredLeads.filter(l => typeof l.aiScore === 'number' && !isNaN(l.aiScore));
+      const avgScore = validScores.length > 0
+        ? Math.round(validScores.reduce((a, b) => a + b.aiScore, 0) / validScores.length)
+        : 'N/A';
+      const kpiMetrics = {
+        totalLeads: filteredLeads.length,
+        newLeads: filteredLeads.filter(l => l.status === 'New').length,
+        hotLeads: filteredLeads.filter(l => l.scoreTier === 'HOT').length,
+        contactedLeads: filteredLeads.filter(l => l.status === 'Contacted').length,
+        convertedLeads: filteredLeads.filter(l => l.status === 'Converted').length,
+        rejectedLeads: filteredLeads.filter(l => l.status === 'Rejected').length,
+        followUpLeads: filteredLeads.filter(l => l.status === 'Follow-up').length,
+        avgAiScore: avgScore,
+        validScoresCount: validScores.length,
+        unscoredCount: filteredLeads.length - validScores.length
+      };
+      exportToExcel(filteredLeads, kpiMetrics, filterSummary, filename);
+      setShowExportModal(false);
+      addToast(`Excel report downloaded successfully (${filteredLeads.length} leads included)`, 'success');
+    } catch (err) {
+      addToast(`Excel export failed: ${err.message}`, 'error');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleExportPDF = () => {
+    if (isExporting) return;
+    if (!filteredLeads || filteredLeads.length === 0) {
+      addToast('No lead records match the active filters to export.', 'error');
+      return;
+    }
+    setIsExporting(true);
+    try {
+      const dateStr = new Date().toISOString().split('T')[0];
+      const filename = `PRCBO_Leads_Report_${activeTab}_${dateStr}.pdf`;
+      const filterSummary = {
+        dateRangeLabel: 'Current Filter View',
+        status: activeTab,
+        category: selectedCategory,
+        location: selectedLocation,
+        service: selectedService
+      };
+      const validScores = filteredLeads.filter(l => typeof l.aiScore === 'number' && !isNaN(l.aiScore));
+      const avgScore = validScores.length > 0
+        ? Math.round(validScores.reduce((a, b) => a + b.aiScore, 0) / validScores.length)
+        : 'N/A';
+      const kpiMetrics = {
+        totalLeads: filteredLeads.length,
+        newLeads: filteredLeads.filter(l => l.status === 'New').length,
+        hotLeads: filteredLeads.filter(l => l.scoreTier === 'HOT').length,
+        contactedLeads: filteredLeads.filter(l => l.status === 'Contacted').length,
+        convertedLeads: filteredLeads.filter(l => l.status === 'Converted').length,
+        rejectedLeads: filteredLeads.filter(l => l.status === 'Rejected').length,
+        followUpLeads: filteredLeads.filter(l => l.status === 'Follow-up').length,
+        avgAiScore: avgScore,
+        validScoresCount: validScores.length,
+        unscoredCount: filteredLeads.length - validScores.length
+      };
+      exportToPDF(filteredLeads, kpiMetrics, filterSummary, filename);
+      setShowExportModal(false);
+      addToast(`PDF report downloaded successfully (${filteredLeads.length} leads included)`, 'success');
+    } catch (err) {
+      addToast(`PDF export failed: ${err.message}`, 'error');
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   // Sync tab with URL search parameter
   useEffect(() => {
@@ -184,7 +275,7 @@ export const Leads = () => {
           <button className="btn btn-outline" onClick={() => navigate('/data-imports')}>
             <Upload size={15} /> Import Leads
           </button>
-          <button className="btn btn-secondary" onClick={() => addToast("Exporting filtered dataset to CSV...", "info")}>
+          <button className="btn btn-secondary" onClick={() => setShowExportModal(true)}>
             <Download size={15} /> Export
           </button>
           <button className="btn btn-primary" onClick={() => setIsAddModalOpen(true)}>
@@ -818,6 +909,122 @@ export const Leads = () => {
           </div>
         </form>
       </Modal>
+
+      {/* Export Report Modal */}
+      {showExportModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: 'rgba(15, 23, 42, 0.6)',
+            backdropFilter: 'blur(4px)'
+          }}
+          onClick={() => setShowExportModal(false)}
+        >
+          <div
+            style={{
+              backgroundColor: '#FFFFFF',
+              borderRadius: '12px',
+              width: '100%',
+              maxWidth: '480px',
+              padding: '1.5rem',
+              boxShadow: '0 20px 25px -5px rgba(0,0,0,0.2)',
+              position: 'relative'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', borderBottom: '1px solid var(--color-slate-100)', paddingBottom: '0.75rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{ width: '32px', height: '32px', borderRadius: '8px', backgroundColor: 'var(--color-primary-light)', color: 'var(--color-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Download size={18} />
+                </div>
+                <div>
+                  <h3 style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--color-slate-900)' }}>
+                    Export Lead Dataset
+                  </h3>
+                  <p style={{ fontSize: '0.75rem', color: 'var(--color-slate-500)' }}>
+                    {filteredLeads.length} leads matching current filters
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowExportModal(false)}
+                style={{ background: 'none', border: 'none', color: 'var(--color-slate-400)', cursor: 'pointer' }}
+              >
+                <XCircle size={18} />
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.25rem' }}>
+              <button
+                onClick={handleExportExcel}
+                disabled={isExporting}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                  padding: '1rem',
+                  borderRadius: '10px',
+                  border: '1px solid var(--color-slate-200)',
+                  backgroundColor: isExporting ? 'var(--color-slate-50)' : '#FFFFFF',
+                  cursor: isExporting ? 'not-allowed' : 'pointer',
+                  textAlign: 'left'
+                }}
+              >
+                <div style={{ width: '40px', height: '40px', borderRadius: '8px', backgroundColor: '#ECFDF5', color: '#10B981', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Database size={20} />
+                </div>
+                <div>
+                  <strong style={{ fontSize: '0.875rem', color: 'var(--color-slate-900)', display: 'block' }}>
+                    Microsoft Excel (.xlsx)
+                  </strong>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--color-slate-500)' }}>
+                    Dual-sheet workbook with analytics summary and full lead fields
+                  </span>
+                </div>
+              </button>
+
+              <button
+                onClick={handleExportPDF}
+                disabled={isExporting}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                  padding: '1rem',
+                  borderRadius: '10px',
+                  border: '1px solid var(--color-slate-200)',
+                  backgroundColor: isExporting ? 'var(--color-slate-50)' : '#FFFFFF',
+                  cursor: isExporting ? 'not-allowed' : 'pointer',
+                  textAlign: 'left'
+                }}
+              >
+                <div style={{ width: '40px', height: '40px', borderRadius: '8px', backgroundColor: '#FFF7ED', color: '#FF7A00', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Sparkles size={20} />
+                </div>
+                <div>
+                  <strong style={{ fontSize: '0.875rem', color: 'var(--color-slate-900)', display: 'block' }}>
+                    Executive PDF Report (.pdf)
+                  </strong>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--color-slate-500)' }}>
+                    Landscape presentation with KPI cards and paginated records
+                  </span>
+                </div>
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn btn-secondary" onClick={() => setShowExportModal(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

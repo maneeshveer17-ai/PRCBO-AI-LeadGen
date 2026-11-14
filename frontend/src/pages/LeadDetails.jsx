@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
+import { generateOutreachForLead } from '../services/aiOutreachService.js';
 import {
   ArrowLeft,
   Edit,
@@ -25,21 +26,42 @@ import {
   Monitor,
   Flame,
   AlertCircle,
-  Trash2
+  AlertTriangle,
+  Zap,
+  Trash2,
+  FileText,
+  MessageSquare
 } from 'lucide-react';
 import { useLeads } from '../context/LeadContext';
 import ScoreRing from '../components/common/ScoreRing';
 import StatusBadge from '../components/common/StatusBadge';
 import ScoreBadge from '../components/common/ScoreBadge';
 import Modal from '../components/common/Modal';
+import EmptyState from '../components/common/EmptyState';
+import LoadingSkeleton from '../components/common/LoadingSkeleton';
 
 export const LeadDetails = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { leads, updateLeadStatus, deleteLead, recordOutreach, addToast } = useLeads();
+  const {
+    leads,
+    updateLead,
+    updateLeadStatus,
+    deleteLead,
+    recordOutreach,
+    sendOutreachEmail,
+    sendOutreachWhatsApp,
+    addToast,
+    scoreLeadRecord,
+    analyzeLeadRecord,
+    isLoadingLeads
+  } = useLeads();
 
-  // Find lead by ID or fallback to the first
-  const lead = leads.find(l => l.id === id) || leads[0];
+  // Find lead by ID or fallback safely
+  const lead = leads.find(l => l.id === id) || (leads.length > 0 ? leads[0] : null);
+
+  const [isScoring, setIsScoring] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   // Active outreach tab
   const [activeOutreachTab, setActiveOutreachTab] = useState('whatsapp');
@@ -49,11 +71,58 @@ export const LeadDetails = () => {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
 
   // Editable outreach text
-  const [outreachDrafts, setOutreachDrafts] = useState(lead.outreachDrafts || {
-    email: { subject: `Partnership proposal for ${lead.businessName}`, body: 'Hello...' },
-    whatsapp: { message: `Hello ${lead.contactPerson || 'there'}! Greetings from PRCBO Tech.` },
-    initialMessage: `Hi ${lead.contactPerson || ''}, let's connect regarding your digital modernization.`
+  const [outreachDrafts, setOutreachDrafts] = useState(() => lead?.outreachDrafts || {
+    email: { subject: `Partnership proposal for ${lead?.businessName || 'Prospect'}`, body: 'Hello...' },
+    whatsapp: { message: `Hello ${lead?.contactPerson || 'there'}! Greetings from PRCBO Tech.` },
+    initialMessage: `Hi ${lead?.contactPerson || ''}, let's connect regarding your digital modernization.`
   });
+
+  const [recipientEmail, setRecipientEmail] = useState(lead?.email || '');
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+
+  // Real WhatsApp dispatch state
+  const [recipientPhone, setRecipientPhone] = useState(lead?.phone || '');
+  const [isSendingWhatsApp, setIsSendingWhatsApp] = useState(false);
+  const isSendingWhatsAppRef = useRef(false);
+  const [whatsAppDraftKey, setWhatsAppDraftKey] = useState(() => `wa-${lead?.id || 'lead'}-${Date.now()}`);
+  const [whatsAppCooldown, setWhatsAppCooldown] = useState(0);
+  const [whatsAppType, setWhatsAppType] = useState('template'); // 'template' (Meta Cloud API Approved) or 'text' (24h customer window)
+  const [whatsAppTemplateName, setWhatsAppTemplateName] = useState('prcbo_lead_outreach');
+  const [whatsAppLanguage, setWhatsAppLanguage] = useState('en_US');
+  const [paramContact, setParamContact] = useState(lead?.contactPerson || 'Business Owner');
+  const [paramBusiness, setParamBusiness] = useState(lead?.businessName || 'Business');
+  const [paramService, setParamService] = useState(lead?.recommendedService || 'Digital Modernization');
+
+  useEffect(() => {
+    if (lead?.email) {
+      setRecipientEmail(lead.email);
+    }
+    if (lead?.phone) {
+      setRecipientPhone(lead.phone);
+    }
+    if (lead) {
+      setParamContact(lead.contactPerson || 'Business Owner');
+      setParamBusiness(lead.businessName || 'Business');
+      setParamService(lead.recommendedService || 'Digital Modernization');
+      setWhatsAppDraftKey(`wa-${lead.id}-${Date.now()}`);
+      setWhatsAppCooldown(0);
+    }
+  }, [lead?.id, lead?.email, lead?.phone, lead?.contactPerson, lead?.businessName, lead?.recommendedService]);
+
+  // Cooldown countdown timer effect
+  useEffect(() => {
+    if (whatsAppCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setWhatsAppCooldown(prev => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [whatsAppCooldown]);
 
   const handleCopyOutreach = () => {
     let contentToCopy = '';
@@ -71,17 +140,155 @@ export const LeadDetails = () => {
     setTimeout(() => setIsCopied(false), 2000);
   };
 
-  const handleRegenerateOutreach = () => {
-    setIsRegenerating(true);
-    setTimeout(() => {
-      setIsRegenerating(false);
-      addToast('AI recalculated pitch angle and regenerated draft!', 'success');
-    }, 600);
+  const handleScoreLead = async () => {
+    if (!lead || !scoreLeadRecord) return;
+    setIsScoring(true);
+    try {
+      await scoreLeadRecord(lead.id);
+    } catch (err) {
+      addToast(`Evaluation error: ${err.message}`, 'error');
+    } finally {
+      setIsScoring(false);
+    }
   };
 
-  const handleDispatchOutreach = () => {
-    const channelName = activeOutreachTab === 'email' ? 'Email' : activeOutreachTab === 'whatsapp' ? 'WhatsApp' : 'Initial Message';
-    recordOutreach(lead, channelName, 'Draft dispatched');
+  // Synchronize outreach drafts whenever the selected lead changes
+  useEffect(() => {
+    if (lead?.outreachDrafts) {
+      setOutreachDrafts(lead.outreachDrafts);
+    }
+  }, [lead?.id, lead?.outreachDrafts]);
+
+  const handleRunAiAnalysis = async () => {
+    if (!lead || !analyzeLeadRecord) return;
+    setIsAnalyzing(true);
+    try {
+      const result = await analyzeLeadRecord(lead.id);
+      if (result?.success) {
+        if (result.outreachDrafts) {
+          setOutreachDrafts(result.outreachDrafts);
+        }
+      }
+    } catch (err) {
+      addToast(`AI Analysis error: ${err.message}`, 'error');
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleRegenerateOutreach = async () => {
+    if (!lead) return;
+    setIsRegenerating(true);
+    try {
+      const freshDrafts = await generateOutreachForLead(lead);
+      if (freshDrafts) {
+        setOutreachDrafts(freshDrafts);
+        // Persist newly generated drafts to Supabase
+        await updateLead(lead.id, { outreachDrafts: freshDrafts });
+        addToast(`AI synthesized personalized outreach for "${lead.businessName}"!`, 'success');
+      }
+    } catch (err) {
+      addToast(`Outreach generation error: ${err.message}`, 'error');
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
+  const handleDispatchOutreach = async () => {
+    let messageContent = '';
+    let channelName = 'Initial Message';
+    if (activeOutreachTab === 'email') {
+      channelName = 'Email';
+      messageContent = outreachDrafts?.email?.subject
+        ? `Subject: ${outreachDrafts.email.subject}\n\n${outreachDrafts.email.body || ''}`
+        : (outreachDrafts?.email?.body || '');
+    } else if (activeOutreachTab === 'whatsapp') {
+      channelName = 'WhatsApp';
+      messageContent = outreachDrafts?.whatsapp?.message || '';
+    } else {
+      messageContent = outreachDrafts?.initialMessage || '';
+    }
+    await recordOutreach(lead, channelName, messageContent);
+  };
+
+  const handleSendRealEmail = async () => {
+    if (!lead) return;
+    const to = (recipientEmail || lead.email || '').trim();
+    if (!to || !to.includes('@')) {
+      addToast('A valid recipient email address is required to dispatch email.', 'error');
+      return;
+    }
+    const subject = (outreachDrafts?.email?.subject || '').trim();
+    const body = (outreachDrafts?.email?.body || '').trim();
+    if (!subject || !body) {
+      addToast('Email subject and body must not be empty.', 'error');
+      return;
+    }
+
+    setIsSendingEmail(true);
+    try {
+      await sendOutreachEmail(lead, {
+        to,
+        subject,
+        body,
+        template: `${lead.recommendedService || 'Digital Modernization'} Outreach`,
+        idempotencyKey: `email-${lead.id}-${Date.now()}`
+      });
+    } catch (err) {
+      addToast(`Error dispatching email: ${err.message}`, 'error');
+    } finally {
+      setIsSendingEmail(false);
+    }
+  };
+
+  const handleSendRealWhatsApp = async () => {
+    if (!lead) return;
+    if (isSendingWhatsAppRef.current || isSendingWhatsApp || whatsAppCooldown > 0) {
+      return;
+    }
+
+    const to = (recipientPhone || lead.phone || '').trim();
+    if (!to || !to.replace(/\D/g, '')) {
+      addToast('A valid recipient phone number is required to dispatch WhatsApp message.', 'error');
+      return;
+    }
+
+    isSendingWhatsAppRef.current = true;
+    setIsSendingWhatsApp(true);
+    try {
+      let result;
+      if (whatsAppType === 'template') {
+        const isHelloWorld = whatsAppTemplateName.trim().toLowerCase() === 'hello_world';
+        result = await sendOutreachWhatsApp(lead, {
+          to,
+          templateName: whatsAppTemplateName.trim(),
+          languageCode: whatsAppLanguage,
+          templateParameters: isHelloWorld ? [] : [paramContact.trim(), paramBusiness.trim(), paramService.trim()],
+          idempotencyKey: whatsAppDraftKey
+        });
+      } else {
+        const bodyText = (outreachDrafts?.whatsapp?.message || '').trim();
+        if (!bodyText) {
+          addToast('WhatsApp message text cannot be empty.', 'error');
+          return;
+        }
+        result = await sendOutreachWhatsApp(lead, {
+          to,
+          message: bodyText,
+          idempotencyKey: whatsAppDraftKey
+        });
+      }
+
+      if (result?.success) {
+        setWhatsAppCooldown(60);
+        setWhatsAppDraftKey(`wa-${lead.id}-${Date.now()}`);
+      }
+    } catch (err) {
+      addToast(`Error dispatching WhatsApp: ${err.message}`, 'error');
+    } finally {
+      setIsSendingWhatsApp(false);
+      isSendingWhatsAppRef.current = false;
+    }
   };
 
   const getOpportunityColor = (level) => {
@@ -95,6 +302,26 @@ export const LeadDetails = () => {
         return { bg: '#F8FAFC', border: '#E2E8F0', text: '#64748B', badge: '#94A3B8' };
     }
   };
+
+  if (!lead) {
+    if (isLoadingLeads) {
+      return (
+        <div style={{ padding: '2rem' }}>
+          <LoadingSkeleton count={6} />
+        </div>
+      );
+    }
+    return (
+      <div style={{ padding: '2rem' }}>
+        <EmptyState
+          title="Lead Not Found"
+          description="The requested lead record could not be found or has not been loaded from the database."
+          actionText="Back to Leads"
+          onAction={() => navigate('/leads')}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -150,6 +377,24 @@ export const LeadDetails = () => {
               onClick={() => setIsStatusModalOpen(true)}
             >
               Update Status
+            </button>
+            <button
+              className="btn btn-outline"
+              onClick={handleRunAiAnalysis}
+              disabled={isAnalyzing}
+              title="Run AI Opportunity Analysis & Synthesize Multi-channel Outreach"
+            >
+              <Sparkles size={15} style={{ color: 'var(--color-primary)' }} className={isAnalyzing ? 'animate-spin' : ''} />
+              {isAnalyzing ? 'Analyzing...' : 'AI Deep Analysis'}
+            </button>
+            <button
+              className="btn btn-outline"
+              onClick={handleScoreLead}
+              disabled={isScoring}
+              title="Calculate deterministic qualification score"
+            >
+              <Zap size={15} style={{ color: '#FF7A00' }} className={isScoring ? 'animate-spin' : ''} />
+              {isScoring ? 'Evaluating...' : lead?.aiScore !== null && lead?.aiScore !== undefined ? 'Recalculate Score' : 'Run AI Evaluation'}
             </button>
             <button
               className="btn btn-outline"
@@ -275,18 +520,29 @@ export const LeadDetails = () => {
                   Autonomous opportunity scoring evaluated by PRCBO multi-factor intelligence engine
                 </p>
               </div>
-              <span
-                style={{
-                  fontSize: '0.75rem',
-                  fontWeight: 700,
-                  color: 'var(--color-primary)',
-                  backgroundColor: 'var(--color-primary-light)',
-                  padding: '0.2rem 0.6rem',
-                  borderRadius: '6px'
-                }}
-              >
-                {lead.confidence} Accuracy Score
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  className="btn btn-outline btn-sm"
+                  onClick={handleRunAiAnalysis}
+                  disabled={isAnalyzing}
+                  title="Run AI Deep Analysis"
+                >
+                  <Sparkles size={13} style={{ color: 'var(--color-primary)' }} className={isAnalyzing ? 'animate-spin' : ''} />
+                  {isAnalyzing ? 'Analyzing...' : 'Run AI Analysis'}
+                </button>
+                <span
+                  style={{
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    color: 'var(--color-primary)',
+                    backgroundColor: 'var(--color-primary-light)',
+                    padding: '0.2rem 0.6rem',
+                    borderRadius: '6px'
+                  }}
+                >
+                  {lead.confidence} Accuracy Score
+                </span>
+              </div>
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem' }}>
@@ -471,6 +727,26 @@ export const LeadDetails = () => {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                   <div>
                     <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-slate-600)' }}>
+                      Recipient Email (Required for Real Delivery)
+                    </label>
+                    <input
+                      type="email"
+                      value={recipientEmail}
+                      onChange={(e) => setRecipientEmail(e.target.value)}
+                      placeholder="e.g. contact@business.com"
+                      style={{
+                        width: '100%',
+                        height: '38px',
+                        padding: '0 0.875rem',
+                        borderRadius: '6px',
+                        border: '1px solid var(--color-slate-200)',
+                        fontSize: '0.875rem',
+                        marginTop: '4px'
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-slate-600)' }}>
                       Email Subject
                     </label>
                     <input
@@ -518,32 +794,166 @@ export const LeadDetails = () => {
               )}
 
               {activeOutreachTab === 'whatsapp' && (
-                <div>
-                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-slate-600)' }}>
-                    WhatsApp Message Draft
-                  </label>
-                  <textarea
-                    rows={5}
-                    value={outreachDrafts.whatsapp.message}
-                    onChange={(e) => setOutreachDrafts({
-                      ...outreachDrafts,
-                      whatsapp: { message: e.target.value }
-                    })}
-                    style={{
-                      width: '100%',
-                      padding: '0.875rem',
-                      borderRadius: '8px',
-                      border: '1px solid var(--color-slate-200)',
-                      fontSize: '0.875rem',
-                      lineHeight: 1.5,
-                      fontFamily: 'var(--font-family-body)',
-                      marginTop: '4px',
-                      backgroundColor: '#F0FDF4'
-                    }}
-                  />
-                  <div style={{ fontSize: '0.75rem', color: '#166534', marginTop: '4px' }}>
-                    Tip: WhatsApp messages with direct value propositions receive 3.2x higher response rates in Tamil Nadu business corridors.
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
+                  {/* Recipient Phone */}
+                  <div>
+                    <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-slate-600)' }}>
+                      Recipient Phone Number (Required for Meta Cloud API Delivery)
+                    </label>
+                    <input
+                      type="tel"
+                      value={recipientPhone}
+                      onChange={(e) => setRecipientPhone(e.target.value)}
+                      placeholder="e.g. +91 98400 12345 (E.164 digits)"
+                      style={{
+                        width: '100%',
+                        height: '38px',
+                        padding: '0 0.875rem',
+                        borderRadius: '6px',
+                        border: '1px solid var(--color-slate-200)',
+                        fontSize: '0.875rem',
+                        marginTop: '4px'
+                      }}
+                    />
                   </div>
+
+                  {/* Message Mode Selector */}
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center', backgroundColor: '#F8FAFC', padding: '0.625rem 0.875rem', borderRadius: '6px', border: '1px solid var(--color-slate-200)' }}>
+                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-slate-600)' }}>Delivery Mode:</span>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8125rem', cursor: 'pointer' }}>
+                      <input
+                        type="radio"
+                        name="whatsapp_mode"
+                        checked={whatsAppType === 'template'}
+                        onChange={() => setWhatsAppType('template')}
+                      />
+                      <span style={{ fontWeight: whatsAppType === 'template' ? 600 : 400 }}>Approved Template (Outbound)</span>
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8125rem', cursor: 'pointer' }}>
+                      <input
+                        type="radio"
+                        name="whatsapp_mode"
+                        checked={whatsAppType === 'text'}
+                        onChange={() => setWhatsAppType('text')}
+                      />
+                      <span style={{ fontWeight: whatsAppType === 'text' ? 600 : 400 }}>Direct Text (24h Window)</span>
+                    </label>
+                  </div>
+
+                  {whatsAppType === 'template' ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', backgroundColor: '#F0FDF4', padding: '1rem', borderRadius: '8px', border: '1px solid #BBF7D0' }}>
+                      <div style={{ fontSize: '0.75rem', color: '#166534', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <CheckCircle2 size={14} /> Meta Approved Template Dispatch (Outside 24h Customer-Service Window)
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '0.75rem' }}>
+                        <div>
+                          <label style={{ fontSize: '0.6875rem', fontWeight: 600, color: '#166534' }}>Template Name</label>
+                          <select
+                            value={['hello_world', 'prcbo_lead_outreach'].includes(whatsAppTemplateName) ? whatsAppTemplateName : 'custom'}
+                            onChange={(e) => {
+                              if (e.target.value === 'custom') {
+                                setWhatsAppTemplateName('');
+                              } else {
+                                setWhatsAppTemplateName(e.target.value);
+                              }
+                            }}
+                            style={{ width: '100%', height: '34px', padding: '0 0.5rem', borderRadius: '4px', border: '1px solid #86EFAC', fontSize: '0.8125rem', marginTop: '2px', backgroundColor: '#FFFFFF' }}
+                          >
+                            <option value="hello_world">hello_world (Meta Approved Test - 0 Params)</option>
+                            <option value="prcbo_lead_outreach">prcbo_lead_outreach (Personalized Outreach - 3 Params)</option>
+                            <option value="custom">Custom Template...</option>
+                          </select>
+                          {!['hello_world', 'prcbo_lead_outreach'].includes(whatsAppTemplateName) && (
+                            <input
+                              type="text"
+                              placeholder="Enter custom template name"
+                              value={whatsAppTemplateName}
+                              onChange={(e) => setWhatsAppTemplateName(e.target.value)}
+                              style={{ width: '100%', height: '34px', padding: '0 0.5rem', borderRadius: '4px', border: '1px solid #86EFAC', fontSize: '0.8125rem', marginTop: '4px' }}
+                            />
+                          )}
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.6875rem', fontWeight: 600, color: '#166534' }}>Language Code</label>
+                          <input
+                            type="text"
+                            value={whatsAppLanguage}
+                            onChange={(e) => setWhatsAppLanguage(e.target.value)}
+                            style={{ width: '100%', height: '34px', padding: '0 0.5rem', borderRadius: '4px', border: '1px solid #86EFAC', fontSize: '0.8125rem', marginTop: '2px' }}
+                          />
+                        </div>
+                      </div>
+
+                      {whatsAppTemplateName.trim().toLowerCase() !== 'hello_world' && (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
+                          <div>
+                            <label style={{ fontSize: '0.6875rem', fontWeight: 600, color: '#166534' }}>Param 1: Contact Person</label>
+                            <input
+                              type="text"
+                              value={paramContact}
+                              onChange={(e) => setParamContact(e.target.value)}
+                              style={{ width: '100%', height: '32px', padding: '0 0.5rem', borderRadius: '4px', border: '1px solid #86EFAC', fontSize: '0.75rem', marginTop: '2px' }}
+                            />
+                          </div>
+                          <div>
+                            <label style={{ fontSize: '0.6875rem', fontWeight: 600, color: '#166534' }}>Param 2: Business Name</label>
+                            <input
+                              type="text"
+                              value={paramBusiness}
+                              onChange={(e) => setParamBusiness(e.target.value)}
+                              style={{ width: '100%', height: '32px', padding: '0 0.5rem', borderRadius: '4px', border: '1px solid #86EFAC', fontSize: '0.75rem', marginTop: '2px' }}
+                            />
+                          </div>
+                          <div>
+                            <label style={{ fontSize: '0.6875rem', fontWeight: 600, color: '#166534' }}>Param 3: Recommended Service</label>
+                            <input
+                              type="text"
+                              value={paramService}
+                              onChange={(e) => setParamService(e.target.value)}
+                              style={{ width: '100%', height: '32px', padding: '0 0.5rem', borderRadius: '4px', border: '1px solid #86EFAC', fontSize: '0.75rem', marginTop: '2px' }}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Live Template Preview */}
+                      <div style={{ backgroundColor: '#FFFFFF', padding: '0.75rem', borderRadius: '6px', border: '1px dashed #86EFAC' }}>
+                        <div style={{ fontSize: '0.6875rem', fontWeight: 700, color: '#15803D', marginBottom: '4px', textTransform: 'uppercase' }}>
+                          {whatsAppTemplateName.trim().toLowerCase() === 'hello_world' ? 'Template Message Preview (Meta Test Template)' : 'Template Message Preview'}
+                        </div>
+                        <div style={{ fontSize: '0.8125rem', color: '#1F2937', fontStyle: 'italic', lineHeight: 1.4 }}>
+                          {whatsAppTemplateName.trim().toLowerCase() === 'hello_world'
+                            ? '\u201CWelcome and congratulations! This message demonstrates your ability to send a WhatsApp message using the Cloud API. Thank you for taking the time to test with us.\u201D'
+                            : `\u201CHello ${paramContact}, greetings from PRCBO Tech! We noticed that ${paramBusiness} has significant opportunities for ${paramService}. Would you like to connect for a quick 10-minute briefing?\u201D`
+                          }
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <div style={{ fontSize: '0.75rem', color: '#B45309', backgroundColor: '#FEF3C7', padding: '0.5rem 0.75rem', borderRadius: '6px', marginBottom: '6px' }}>
+                        Notice: Meta Cloud API allows free-form text only when the recipient initiated a WhatsApp conversation within the last 24 hours.
+                      </div>
+                      <textarea
+                        rows={5}
+                        value={outreachDrafts.whatsapp.message}
+                        onChange={(e) => setOutreachDrafts({
+                          ...outreachDrafts,
+                          whatsapp: { message: e.target.value }
+                        })}
+                        style={{
+                          width: '100%',
+                          padding: '0.875rem',
+                          borderRadius: '8px',
+                          border: '1px solid var(--color-slate-200)',
+                          fontSize: '0.875rem',
+                          lineHeight: 1.5,
+                          fontFamily: 'var(--font-family-body)',
+                          backgroundColor: '#F0FDF4'
+                        }}
+                      />
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -583,7 +993,7 @@ export const LeadDetails = () => {
                   {isCopied ? 'Copied!' : 'Copy to Clipboard'}
                 </button>
 
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                   <button
                     className="btn btn-secondary btn-sm"
                     onClick={() => {
@@ -594,11 +1004,48 @@ export const LeadDetails = () => {
                     Mark as Contacted
                   </button>
                   <button
-                    className="btn btn-primary btn-sm"
+                    className="btn btn-outline btn-sm"
                     onClick={handleDispatchOutreach}
+                    title="Record outreach draft without dispatching an email"
                   >
-                    <Send size={14} /> Send & Log Outreach
+                    <FileText size={14} /> Log Draft Only
                   </button>
+                  {activeOutreachTab === 'email' && (
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={handleSendRealEmail}
+                      disabled={isSendingEmail}
+                      title="Dispatch real email to recipient via Resend API"
+                    >
+                      <Send size={14} className={isSendingEmail ? 'animate-spin' : ''} />
+                      {isSendingEmail ? 'Sending via Resend...' : 'Send Email via Resend'}
+                    </button>
+                  )}
+                  {activeOutreachTab === 'whatsapp' && (
+                    <button
+                      className="btn btn-sm"
+                      style={{
+                        backgroundColor: whatsAppCooldown > 0 ? '#94A3B8' : '#25D366',
+                        borderColor: whatsAppCooldown > 0 ? '#94A3B8' : '#25D366',
+                        color: '#FFFFFF',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        fontWeight: 600,
+                        cursor: (isSendingWhatsApp || whatsAppCooldown > 0) ? 'not-allowed' : 'pointer'
+                      }}
+                      onClick={handleSendRealWhatsApp}
+                      disabled={isSendingWhatsApp || whatsAppCooldown > 0}
+                      title={whatsAppCooldown > 0 ? `Please wait ${whatsAppCooldown}s before sending another outreach` : "Dispatch real WhatsApp message via Meta Cloud API"}
+                    >
+                      <Send size={14} className={isSendingWhatsApp ? 'animate-spin' : ''} />
+                      {isSendingWhatsApp 
+                        ? 'Sending via Meta API...' 
+                        : whatsAppCooldown > 0 
+                          ? `Sent (Cooldown ${whatsAppCooldown}s)` 
+                          : 'Send WhatsApp via Cloud API'}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -635,6 +1082,70 @@ export const LeadDetails = () => {
                 </strong>
               </div>
             </div>
+
+            {/* Deterministic Scoring Breakdown */}
+            {lead.scoringBreakdown && (
+              <div style={{ marginTop: '1.25rem', paddingTop: '1.25rem', borderTop: '1px solid var(--color-slate-100)', textAlign: 'left' }}>
+                <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-slate-500)', textTransform: 'uppercase', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Sparkles size={13} style={{ color: 'var(--color-primary)' }} />
+                  Evaluation Factor Breakdown
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.75rem' }}>
+                  {[
+                    { label: 'Website & Security', score: lead.scoringBreakdown.website?.score ?? 0, max: 30 },
+                    { label: 'Commercial Vitality', score: lead.scoringBreakdown.commercialVitality?.score ?? 0, max: 25 },
+                    { label: 'Category Readiness', score: lead.scoringBreakdown.categoryReadiness?.score ?? 0, max: 20 },
+                    { label: 'Reachability', score: lead.scoringBreakdown.reachability?.score ?? 0, max: 15 },
+                    { label: 'Geographic Hub', score: lead.scoringBreakdown.geographicClustering?.score ?? 0, max: 10 }
+                  ].map((f, idx) => (
+                    <div key={idx}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px', color: 'var(--color-slate-700)', fontWeight: 600 }}>
+                        <span>{f.label}</span>
+                        <span>{f.score} / {f.max} pts</span>
+                      </div>
+                      <div style={{ width: '100%', height: '5px', backgroundColor: 'var(--color-slate-100)', borderRadius: '3px', overflow: 'hidden' }}>
+                        <div style={{ width: `${Math.round((f.score / f.max) * 100)}%`, height: '100%', backgroundColor: f.score === f.max ? 'var(--color-success)' : 'var(--color-primary)', borderRadius: '3px' }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Transparent Missing Information List */}
+            {lead.missingInfo && lead.missingInfo.length > 0 && (
+              <div style={{ marginTop: '1.25rem', padding: '0.875rem', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '8px', textAlign: 'left' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.75rem', fontWeight: 700, color: '#B45309', marginBottom: '6px' }}>
+                  <AlertTriangle size={14} />
+                  <span>Missing Record Information ({lead.missingInfo.length})</span>
+                </div>
+                <p style={{ fontSize: '0.6875rem', color: '#92400E', marginBottom: '6px', lineHeight: 1.4 }}>
+                  Zero fabrication policy active. The following data points were not detected on source records:
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  {lead.missingInfo.slice(0, 3).map((item, idx) => {
+                    const label = typeof item === 'object' && item?.label ? item.label : (typeof item === 'object' && item?.field ? item.field : String(item));
+                    const reason = typeof item === 'object' && item?.reason ? item.reason : 'Data point not detected on source record.';
+                    return (
+                      <div key={idx} style={{ fontSize: '0.6875rem', color: '#78350F', display: 'flex', alignItems: 'flex-start', gap: '5px' }}>
+                        <span style={{ fontWeight: 700 }}>&bull; {label}:</span>
+                        <span style={{ color: '#92400E' }}>{reason}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={handleScoreLead}
+              disabled={isScoring}
+              style={{ width: '100%', marginTop: '1.25rem', justifyContent: 'center' }}
+            >
+              <Zap size={14} style={{ color: '#FF7A00' }} className={isScoring ? 'animate-spin' : ''} />
+              {isScoring ? 'Evaluating Attributes...' : 'Recalculate AI Score'}
+            </button>
           </div>
 
           {/* Quick Lead Status Control */}

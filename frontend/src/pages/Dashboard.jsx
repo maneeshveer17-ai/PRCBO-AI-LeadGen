@@ -32,6 +32,7 @@ import DonutStatusChart from '../components/charts/DonutStatusChart';
 import BarServiceChart from '../components/charts/BarServiceChart';
 import ScoreHistogramChart from '../components/charts/ScoreHistogramChart';
 import LocationDemandChart from '../components/charts/LocationDemandChart';
+import { exportToExcel } from '../services/leadExportService';
 import {
   mockTrendData,
   mockStatusDistribution,
@@ -69,7 +70,32 @@ export const Dashboard = () => {
   };
 
   const handleExport = () => {
-    addToast("Exporting lead dataset to CSV (PRCBO_Leads_2026.csv)...", "info");
+    if (!leads || leads.length === 0) {
+      addToast("No lead records available to export.", "error");
+      return;
+    }
+    try {
+      const dateStr = new Date().toISOString().split('T')[0];
+      const filename = `PRCBO_Dashboard_Leads_${dateStr}.xlsx`;
+      const validScores = leads.filter(l => typeof l.aiScore === 'number' && !isNaN(l.aiScore));
+      const avgScore = validScores.length > 0
+        ? Math.round(validScores.reduce((a, b) => a + b.aiScore, 0) / validScores.length)
+        : 'N/A';
+      const kpiMetrics = {
+        totalLeads: leads.length,
+        newLeads: leads.filter(l => l.status === 'New').length,
+        hotLeads: leads.filter(l => l.scoreTier === 'HOT').length,
+        contactedLeads: leads.filter(l => l.status === 'Contacted').length,
+        convertedLeads: leads.filter(l => l.status === 'Converted').length,
+        avgAiScore: avgScore,
+        validScoresCount: validScores.length,
+        unscoredCount: leads.length - validScores.length
+      };
+      exportToExcel(leads, kpiMetrics, { dateRangeLabel: 'All Active Leads' }, filename);
+      addToast(`Downloaded Excel workbook (${leads.length} records)`, 'success');
+    } catch (err) {
+      addToast(`Export error: ${err.message}`, 'error');
+    }
   };
 
   const handleCreateLead = (e) => {
